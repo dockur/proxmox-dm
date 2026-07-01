@@ -2,18 +2,111 @@
 set -Eeuo pipefail
 
 # Docker environment variables
-: "${DEBUG:="N"}"         # Disable debugging
-: "${PASSWORD:="root"}"   # Default password
+: "${DEBUG:="N"}"             # Enable shell debugging with DEBUG=Y
+: "${PASSWORD:="root"}"       # Default password
+: "${POSTFIX:="Y"}"           # Start Postfix for outgoing system/report mails
+: "${RELAY_HOST:="ext.home.local"}"
 
 # Helper functions
-
 info () { printf "%b%s%b" "\E[1;34m❯ \E[1;36m" "${1:-}" "\E[0m\n"; }
 error () { printf "%b%s%b" "\E[1;31m❯ " "ERROR: ${1:-}" "\E[0m\n" >&2; }
 warn () { printf "%b%s%b" "\E[1;31m❯ " "Warning: ${1:-}" "\E[0m\n" >&2; }
 
+is_enabled() {
+  case "${1:-}" in
+    Y|y|YES|yes|TRUE|true|1|ON|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if is_enabled "$DEBUG"; then
+  set -x
+fi
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    error "Required command not found: $1"
+    exit 21
+  }
+}
+
+process_alive() {
+  local pid="${1:-}"
+
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+wait_process_alive() {
+  local pid="${1:-}"
+  local name="${2:-process}"
+  local seconds="${3:-1}"
+
+  sleep "$seconds"
+
+  if ! process_alive "$pid"; then
+    warn "$name exited shortly after startup."
+    return 1
+  fi
+
+  return 0
+}
+
+read_pidfile() {
+  local file
+
+  for file; do
+    if [ -f "$file" ]; then
+      read -r REPLY < "$file"
+      [ -n "${REPLY:-}" ] && return 0
+    fi
+  done
+
+  REPLY=""
+  return 1
+}
+
+safe_tmpfs_mount() {
+  local target="$1"
+
+  mkdir -p "$target"
+
+  if mountpoint -q "$target"; then
+    return 0
+  fi
+
+  if ! mount -t tmpfs -o rw tmpfs "$target"; then
+    warn "Could not mount tmpfs on $target."
+    return 1
+  fi
+
+  return 0
+}
+
 # Check environment
 [ "$(id -u)" -ne "0" ] && error "Script must be executed with root privileges." && exit 11
 [ ! -f "/usr/local/bin/entrypoint.sh" ] && error "Script must be run inside the container!" && exit 12
+
+# Check required binaries early.
+require_cmd chpasswd
+require_cmd openssl
+require_cmd runuser
+require_cmd supercronic
+require_cmd rsyslogd
+require_cmd grep
+require_cmd awk
+require_cmd mountpoint
+
+dir="/usr/libexec/proxmox"
+
+require_cmd "$dir/proxmox-datacenter-privileged-api"
+require_cmd "$dir/proxmox-datacenter-api"
+
+if is_enabled "$POSTFIX"; then
+  if [ ! -x /etc/init.d/postfix ]; then
+    warn "POSTFIX=Y but /etc/init.d/postfix is missing or not executable."
+  fi
+fi
 
 # Display version number
 info "Starting Proxmox Datacenter Manager for Docker v$(</etc/version)..."
@@ -23,23 +116,25 @@ echo ""
 # Update password for root
 printf 'root:%s\n' "$PASSWORD" | chpasswd
 
-# Get the capability bounding set
-CAP_BND=$(grep '^CapBnd:' /proc/$$/status | awk '{print $2}')
-CAP_BND=$(printf "%d" "0x${CAP_BND}")
+# Get the capability bounding set.
+CAP_BND="$(grep '^CapBnd:' /proc/$$/status | awk '{print $2}')"
+CAP_BND="$(printf "%d" "0x${CAP_BND}")"
 
-# Get the last capability number
-LAST_CAP=$(cat /proc/sys/kernel/cap_last_cap)
+# Get the last capability number.
+LAST_CAP="$(cat /proc/sys/kernel/cap_last_cap)"
 
-# Calculate the maximum capability value
-MAX_CAP=$(((1 << (LAST_CAP + 1)) - 1))
+# Calculate the maximum capability value.
+MAX_CAP="$(((1 << (LAST_CAP + 1)) - 1))"
 
-# Check if container is privileged
-if [ "${CAP_BND}" -ne "${MAX_CAP}" ]; then
+# Check if container is privileged.
+if [ "$CAP_BND" -ne "$MAX_CAP" ]; then
   error "Please start the container with the --privileged flag!"
-  [[ "${DEBUG:-}" != [Yy1]* ]] && exit 14
+  if ! is_enabled "$DEBUG"; then
+    exit 14
+  fi
 fi
 
-# If missing timezone and localtime set them
+# If missing timezone and localtime set them.
 set_timezone() {
   local zone="$1"
 
@@ -74,17 +169,17 @@ elif ! check_localtime; then
   set_timezone "UTC"
 fi
 
-# Ensure directory permissions
+# Ensure directory permissions.
 user="www-data"
-dir="/etc/proxmox-datacenter-manager"
 
+dir="/etc/proxmox-datacenter-manager"
 mkdir -p "$dir"
 chmod 1770 "$dir" || :
 chown "$user:$user" "$dir" || :
 
 dir="/etc/proxmox-datacenter-manager/auth"
 mkdir -p "$dir"
-chmod 750 "$dir" || :
+chmod 0750 "$dir" || :
 chown "root:$user" "$dir" || :
 
 dir="/var/lib/proxmox-datacenter-manager"
@@ -94,7 +189,7 @@ chown "$user:$user" "$dir" || :
 dir="/var/lib/proxmox-datacenter-manager/rrdb"
 mkdir -p "$dir"
 chown "$user:$user" "$dir" || :
-chmod 755 "$dir" || :
+chmod 0755 "$dir" || :
 
 dir="/var/log/proxmox-datacenter-manager"
 mkdir -p "$dir"
@@ -105,54 +200,17 @@ mkdir -p "$dir/shmem"
 chmod 1770 "$dir" || :
 chown "root:$user" "$dir" || :
 chown "root:root" "$dir/shmem" || :
-mount -t tmpfs -o rw tmpfs "$dir/shmem"
 
-# Generate keys
-keys="/etc/proxmox-datacenter-manager/auth"
+safe_tmpfs_mount "$dir/shmem" || :
 
-if [[ ! -f "$keys/authkey.key" ]]; then
-  info "Generating authentication keys..."
-  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$keys/authkey.key" 2>/dev/null
-  openssl pkey -in "$keys/authkey.key" -pubout -out "$keys/authkey.pub" 2>/dev/null
-  chmod 640 "$keys/authkey.key"
-  chmod 644 "$keys/authkey.pub"
-  chown "root:$user" "$keys/authkey.key"
-fi
+# Remove stale PID/socket files.
+rm -f \
+  /run/proxmox-datacenter-manager/priv.sock \
+  /run/proxmox-datacenter-manager/api.sock \
+  /var/spool/postfix/pid/master.pid \
+  /proxmox.end
 
-if [[ ! -f "$keys/csrf.key" ]]; then
-  info "Generating CSRF key..."
-  openssl rand -base64 32 > "$keys/csrf.key"
-  chmod 640 "$keys/csrf.key"
-  chown "root:$user" "$keys/csrf.key"
-fi
-
-if [ ! -f "$keys/api.key" ] || [ ! -f "$keys/api.pem" ]; then
-  info "Generating API key..."
-
-  openssl req -x509 -newkey rsa:4096 -keyout "$keys/api.key" -out "$keys/api.pem" -sha256 -days 3650 -nodes \
-              -subj "/C=XX/ST=StateName/L=CityName/O=CompanyName/OU=CompanySectionName/CN=CommonNameOrHostname" 2>/dev/null
-  chmod 640 "$keys/api.key"
-  chmod 640 "$keys/api.pem"
-  chown "root:$user" "$keys/api.key"
-  chown "root:$user" "$keys/api.pem"
-  echo ""
-fi
-
-dir="/usr/libexec/proxmox"
-
-echo "Starting Postfix..."
-RELAY_HOST=${RELAY_HOST:-ext.home.local}
-sed -i "s/RELAY_HOST/$RELAY_HOST/" /etc/postfix/main.cf
-
-/etc/init.d/postfix start || ok=1
-read -r POSTFIX_PID < /var/spool/postfix/pid/master.pid
-
-echo "Starting supercronic..."
-echo "30 2 * * * $dir/proxmox-datacenter-manager-daily-update 2>&1 | tee -a /tmp/daily.log" > /docker.cron
-supercronic -quiet -no-reap /docker.cron &
-CRON_PID=$!
-
-# Start rsyslog
+# Start rsyslog early because services may expect /dev/log.
 echo "Starting rsyslog..."
 
 cat >/etc/rsyslog.conf <<'EOF'
@@ -167,31 +225,113 @@ if $msg contains 'SYSLOG_IDENTIFIER' then stop
 
 if $programname == 'runuser' then stop
 if $programname == 'rsyslogd' and $msg contains '[origin software="rsyslogd"' then stop
+
 *.* action(type="omfile" file="/var/log/system.log" template="DockerFormat")
 EOF
 
-rm -f /var/log/system.log
-chmod 0644 /etc/rsyslog.conf
+rm -f /dev/log /var/log/system.log
+touch /var/log/system.log
+chmod 0644 /etc/rsyslog.conf /var/log/system.log
 
 rsyslogd -n -iNONE -f /etc/rsyslog.conf &
-RSYSLOG_PID=$!
+RSYSLOG_PID="$!"
 
 while [ ! -S /dev/log ]; do
   sleep 0.2
 done
 
 mkdir -p /run/systemd/journal
-
 ln -sf /dev/log /run/systemd/journal/syslog
 ln -sf /dev/log /run/systemd/journal/socket
 
-touch /var/log/system.log
 tail -F /var/log/system.log &
+TAIL_PID="$!"
 
+# Generate keys.
+keys="/etc/proxmox-datacenter-manager/auth"
+
+if [[ ! -f "$keys/authkey.key" ]]; then
+  info "Generating authentication keys..."
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$keys/authkey.key" 2>/dev/null
+  openssl pkey -in "$keys/authkey.key" -pubout -out "$keys/authkey.pub" 2>/dev/null
+  chmod 0640 "$keys/authkey.key"
+  chmod 0644 "$keys/authkey.pub"
+  chown "root:$user" "$keys/authkey.key"
+fi
+
+if [[ ! -f "$keys/csrf.key" ]]; then
+  info "Generating CSRF key..."
+  openssl rand -base64 32 > "$keys/csrf.key"
+  chmod 0640 "$keys/csrf.key"
+  chown "root:$user" "$keys/csrf.key"
+fi
+
+if [ ! -f "$keys/api.key" ] || [ ! -f "$keys/api.pem" ]; then
+  info "Generating API certificate..."
+
+  openssl req \
+    -x509 \
+    -newkey rsa:4096 \
+    -keyout "$keys/api.key" \
+    -out "$keys/api.pem" \
+    -sha256 \
+    -days 3650 \
+    -nodes \
+    -subj "/C=XX/ST=StateName/L=CityName/O=CompanyName/OU=CompanySectionName/CN=CommonNameOrHostname" \
+    2>/dev/null
+
+  chmod 0640 "$keys/api.key"
+  chmod 0640 "$keys/api.pem"
+  chown "root:$user" "$keys/api.key"
+  chown "root:$user" "$keys/api.pem"
+  echo ""
+fi
+
+dir="/usr/libexec/proxmox"
+
+# Start Postfix.
+#
+# PDM can run without Postfix, but reports/notifications need local mail delivery.
+POSTFIX_PID=""
+
+if is_enabled "$POSTFIX"; then
+  echo "Starting Postfix..."
+
+  if [ -f /etc/postfix/main.cf ]; then
+    if grep -q 'RELAY_HOST' /etc/postfix/main.cf; then
+      sed -i "s|RELAY_HOST|$RELAY_HOST|g" /etc/postfix/main.cf
+    fi
+  fi
+
+  if [ -x /etc/init.d/postfix ]; then
+    /etc/init.d/postfix start || warn "Could not start Postfix."
+
+    if read_pidfile /var/spool/postfix/pid/master.pid; then
+      POSTFIX_PID="$REPLY"
+    else
+      warn "Postfix started but master.pid was not found."
+    fi
+  else
+    warn "Postfix init script not found."
+  fi
+fi
+
+# Start supercronic.
+echo "Starting supercronic..."
+
+cat >/docker.cron <<EOF
+30 2 * * * $dir/proxmox-datacenter-manager-daily-update 2>&1 | tee -a /tmp/daily.log
+EOF
+
+supercronic -quiet -no-reap /docker.cron &
+CRON_PID="$!"
+wait_process_alive "$CRON_PID" "supercronic" 1 || :
+
+# Trap helper.
 _trap() {
   local func="$1"; shift
   local sig
-  TRAP_PID=$BASHPID
+  TRAP_PID="$BASHPID"
 
   for sig; do
     trap "$func $sig" "$sig"
@@ -199,29 +339,33 @@ _trap() {
 }
 
 cleanup() {
-
   [ -f /proxmox.end ] && return 0
-  [[ $BASHPID != "$TRAP_PID" ]] && return 0
+  [[ "${BASHPID:-}" != "${TRAP_PID:-}" ]] && return 0
 
   touch /proxmox.end
   echo "Shutting down PDM services..."
 
   pids=(
-    "$API_PID"
-    "$PRIV_API_PID"
-    "$CRON_PID"
-    "$POSTFIX_PID"
-    "$RSYSLOG_PID"
+    "${API_PID:-}"
+    "${PRIV_API_PID:-}"
+    "${CRON_PID:-}"
+    "${POSTFIX_PID:-}"
+    "${RSYSLOG_PID:-}"
+    "${TAIL_PID:-}"
   )
 
-  # Send SIGTERM
+  # Send SIGTERM.
   for pid in "${pids[@]}"; do
     [[ -z "${pid:-}" ]] && continue
     kill -0 "$pid" 2>/dev/null || continue
     kill -TERM "$pid" 2>/dev/null || :
   done
 
-  # Wait for processes
+  if is_enabled "$POSTFIX" && [ -x /etc/init.d/postfix ]; then
+    /etc/init.d/postfix stop 2>/dev/null || :
+  fi
+
+  # Wait for processes.
   for pid in "${pids[@]}"; do
     [[ -z "${pid:-}" ]] && continue
     kill -0 "$pid" 2>/dev/null || continue
@@ -233,21 +377,29 @@ cleanup() {
   exit 0
 }
 
-# Init trap
+# Init trap.
 rm -f /proxmox.end
 _trap cleanup SIGTERM SIGINT
 
-# Start PDM Services
+# Start PDM services.
 echo "Starting proxmox-datacenter-privileged-api..."
 "$dir/proxmox-datacenter-privileged-api" &
+PRIV_API_PID="$!"
 
-PRIV_API_PID=$!
+wait_process_alive "$PRIV_API_PID" "proxmox-datacenter-privileged-api" 1 || cleanup
+
 sock="/run/proxmox-datacenter-manager/priv.sock"
 
-# Wait for the privileged API socket to be ready
-for i in $(seq 0 30); do
+# Wait for the privileged API socket to be ready.
+for i in $(seq 1 30); do
   [[ -S "$sock" ]] && break
-  (( i > 0 )) && info "Waiting for privileged API socket ($i/30)..."
+
+  if ! process_alive "$PRIV_API_PID"; then
+    warn "Privileged API exited before creating socket."
+    cleanup
+  fi
+
+  info "Waiting for privileged API socket ($i/30)..."
   sleep 1
 done
 
@@ -256,12 +408,33 @@ if [[ ! -S "$sock" ]]; then
 fi
 
 echo "Starting proxmox-datacenter-api as $user on port ${PORT:-8443}..."
+
 msg="failed to collect blockdev statistics for "
 
-runuser -u www-data -- \
-    "$dir/proxmox-datacenter-api" \
-    2> >(grep -v "$msg" >&2) &
-API_PID=$!
+runuser -u "$user" -- \
+  "$dir/proxmox-datacenter-api" \
+  2> >(grep -v "$msg" >&2) &
+API_PID="$!"
+
+wait_process_alive "$API_PID" "proxmox-datacenter-api" 1 || cleanup
+
+# Final readiness check.
+echo "Checking PDM readiness..."
+
+if command -v ss >/dev/null 2>&1; then
+  for _ in $(seq 1 60); do
+    if ss -ltn | grep -q ":${PORT:-8443} "; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! ss -ltn | grep -q ":${PORT:-8443} "; then
+    warn "PDM web interface does not appear to be listening on port ${PORT:-8443}."
+  fi
+else
+  warn "Cannot run readiness port check because 'ss' is not installed."
+fi
 
 echo ""
 info "------------------------------------------------------------------------------"
@@ -274,8 +447,23 @@ info "--------------------------------------------------------------------------
 info ""
 echo ""
 
-# Wait for processes
-wait -n "${PRIV_API_PID:-}" "${API_PID:-}" 2>/dev/null || :
+# Wait for required processes.
+while true; do
+  sleep 5
 
-info "A PDM process exited unexpectedly. Shutting down..."
+  process_alive "$PRIV_API_PID" || break
+  process_alive "$API_PID" || break
+
+  if [ -n "${CRON_PID:-}" ] && ! process_alive "$CRON_PID"; then
+    warn "supercronic exited. Daily update job will no longer run."
+    CRON_PID=""
+  fi
+
+  if [ -n "${POSTFIX_PID:-}" ] && ! process_alive "$POSTFIX_PID"; then
+    warn "Postfix exited. Notifications/reports may not work."
+    POSTFIX_PID=""
+  fi
+done
+
+info "A required PDM process exited unexpectedly. Shutting down..."
 cleanup
