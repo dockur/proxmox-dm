@@ -2,9 +2,9 @@
 set -Eeuo pipefail
 
 # Docker environment variables
-: "${DEBUG:="N"}"             # Enable shell debugging with DEBUG=Y
+: "${DEBUG:="N"}"             # Enable shell debugging
 : "${PASSWORD:="root"}"       # Default password
-: "${POSTFIX:="Y"}"           # Start Postfix for outgoing system/report mails
+: "${POSTFIX:="Y"}"           # Start Postfix for mails
 : "${RELAY_HOST:="ext.home.local"}"
 
 # Helper functions
@@ -18,10 +18,6 @@ is_enabled() {
     *) return 1 ;;
   esac
 }
-
-if is_enabled "$DEBUG"; then
-  set -x
-fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -407,7 +403,7 @@ if [[ ! -S "$sock" ]]; then
   warn "Privileged API socket not found after 30s, starting API anyway."
 fi
 
-echo "Starting proxmox-datacenter-api as $user on port ${PORT:-8443}..."
+echo "Starting proxmox-datacenter-api..."
 
 msg="failed to collect blockdev statistics for "
 
@@ -419,7 +415,7 @@ API_PID="$!"
 wait_process_alive "$API_PID" "proxmox-datacenter-api" 1 || cleanup
 
 # Final readiness check.
-echo "Checking PDM readiness..."
+echo "Checking Datacenter Manager readiness..."
 
 if command -v ss >/dev/null 2>&1; then
   for _ in $(seq 1 60); do
