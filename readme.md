@@ -96,6 +96,10 @@ Special thanks to [willmortimer](https://github.com/willmortimer), [wofferl](htt
 ## Stars 🌟
 [![Stargazers](https://raw.githubusercontent.com/star-stats/stars/refs/heads/data/charts/dockur-proxmox-dm.svg)](https://github.com/dockur/proxmox-dm/stargazers)
 
+## Disclaimer ⚖️
+
+*The product names, logos, brands, and other trademarks referred to within this project are the property of their respective trademark holders. This project is not affiliated, sponsored, or endorsed by Proxmox Server Solutions GmbH.*
+
 [build_url]: https://github.com/dockur/proxmox-dm/
 [hub_url]: https://hub.docker.com/r/dockurr/proxmox-dm/
 [tag_url]: https://hub.docker.com/r/dockurr/proxmox-dm/tags
