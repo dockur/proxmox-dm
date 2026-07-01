@@ -87,7 +87,7 @@ volumes:
 
 ### Are there containers available for other Proxmox products?
 
-  Yes, see our [Proxmox VE](https://github.com/dockur/proxmox) and [Proxmox Backup Server](https://github.com/dockur/proxmox-backup) containers.
+  Yes, see our [Proxmox VE](https://github.com/dockur/proxmox), [Proxmox Backup Server](https://github.com/dockur/proxmox-backup) and [Proxmox Mail Gateway](https://github.com/dockur/proxmox-mail) containers.
 
 ## Acknowledgements 🙏
 
