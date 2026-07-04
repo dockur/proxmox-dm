@@ -169,7 +169,7 @@ echo "root:root" | chpasswd
 
 # Redirect rsyslog
 sed -i '/.*imklog.*/d' /etc/rsyslog.conf && \
-    echo '*.* -/proc/1/fd/' >> /etc/rsyslog.conf
+    echo '*.* -/proc/1/fd/1' >> /etc/rsyslog.conf
 
 # Store version number
 echo "$VERSION_ARG" > /etc/version
