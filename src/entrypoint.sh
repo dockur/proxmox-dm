@@ -26,6 +26,22 @@ require_cmd() {
   }
 }
 
+ensure_dir() {
+  local dir="$1"
+  local mode="${2:-}"
+  local owner="${3:-}"
+
+  mkdir -p "$dir"
+
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$dir" || :
+  fi
+
+  if [ -n "$owner" ]; then
+    chown "$owner" "$dir" || :
+  fi
+}
+
 process_alive() {
   local pid="${1:-}"
 
@@ -46,6 +62,44 @@ wait_process_alive() {
   fi
 
   return 0
+}
+
+wait_socket() {
+  local sock="$1"
+  local pid="$2"
+  local name="$3"
+  local seconds="$4"
+  local i
+
+  for i in $(seq 1 "$seconds"); do
+    [[ -S "$sock" ]] && return 0
+
+    if ! process_alive "$pid"; then
+      warn "$name exited before creating socket."
+      cleanup
+    fi
+
+    info "Waiting for $name socket ($i/$seconds)..."
+    sleep 1
+  done
+
+  return 1
+}
+
+wait_port() {
+  local pattern="$1"
+  local seconds="$2"
+  local message="$3"
+
+  for _ in $(seq 1 "$seconds"); do
+    if ss -ltn | grep -q "$pattern"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "$message"
+  return 1
 }
 
 read_pidfile() {
@@ -84,19 +138,21 @@ safe_tmpfs_mount() {
 [ ! -f "/usr/local/bin/entrypoint.sh" ] && error "Script must be run inside the container!" && exit 12
 
 # Check required binaries early.
-require_cmd chpasswd
-require_cmd openssl
-require_cmd runuser
-require_cmd supercronic
-require_cmd rsyslogd
-require_cmd grep
-require_cmd awk
-require_cmd mountpoint
-
 dir="/usr/libexec/proxmox"
 
-require_cmd "$dir/proxmox-datacenter-privileged-api"
-require_cmd "$dir/proxmox-datacenter-api"
+for cmd in \
+  chpasswd \
+  openssl \
+  runuser \
+  supercronic \
+  rsyslogd \
+  grep \
+  awk \
+  mountpoint \
+  "$dir/proxmox-datacenter-privileged-api" \
+  "$dir/proxmox-datacenter-api"; do
+  require_cmd "$cmd"
+done
 
 if is_enabled "$POSTFIX"; then
   if [ ! -x /etc/init.d/postfix ]; then
@@ -168,36 +224,15 @@ fi
 # Ensure directory permissions.
 user="www-data"
 
-dir="/etc/proxmox-datacenter-manager"
-mkdir -p "$dir"
-chmod 1770 "$dir" || :
-chown "$user:$user" "$dir" || :
+ensure_dir "/etc/proxmox-datacenter-manager" 1770 "$user:$user"
+ensure_dir "/etc/proxmox-datacenter-manager/auth" 0750 "root:$user"
+ensure_dir "/var/lib/proxmox-datacenter-manager" "" "$user:$user"
+ensure_dir "/var/lib/proxmox-datacenter-manager/rrdb" 0755 "$user:$user"
+ensure_dir "/var/log/proxmox-datacenter-manager" "" "root:$user"
+ensure_dir "/run/proxmox-datacenter-manager" 1770 "root:$user"
+ensure_dir "/run/proxmox-datacenter-manager/shmem" "" "root:root"
 
-dir="/etc/proxmox-datacenter-manager/auth"
-mkdir -p "$dir"
-chmod 0750 "$dir" || :
-chown "root:$user" "$dir" || :
-
-dir="/var/lib/proxmox-datacenter-manager"
-mkdir -p "$dir"
-chown "$user:$user" "$dir" || :
-
-dir="/var/lib/proxmox-datacenter-manager/rrdb"
-mkdir -p "$dir"
-chown "$user:$user" "$dir" || :
-chmod 0755 "$dir" || :
-
-dir="/var/log/proxmox-datacenter-manager"
-mkdir -p "$dir"
-chown "root:$user" "$dir" || :
-
-dir="/run/proxmox-datacenter-manager"
-mkdir -p "$dir/shmem"
-chmod 1770 "$dir" || :
-chown "root:$user" "$dir" || :
-chown "root:root" "$dir/shmem" || :
-
-safe_tmpfs_mount "$dir/shmem" || :
+safe_tmpfs_mount "/run/proxmox-datacenter-manager/shmem" || :
 
 # Remove stale PID/socket files.
 rm -f \
@@ -387,19 +422,7 @@ wait_process_alive "$PRIV_API_PID" "proxmox-datacenter-privileged-api" 1 || clea
 sock="/run/proxmox-datacenter-manager/priv.sock"
 
 # Wait for the privileged API socket to be ready.
-for i in $(seq 1 30); do
-  [[ -S "$sock" ]] && break
-
-  if ! process_alive "$PRIV_API_PID"; then
-    warn "Privileged API exited before creating socket."
-    cleanup
-  fi
-
-  info "Waiting for privileged API socket ($i/30)..."
-  sleep 1
-done
-
-if [[ ! -S "$sock" ]]; then
+if ! wait_socket "$sock" "$PRIV_API_PID" "privileged API" 30; then
   warn "Privileged API socket not found after 30s, starting API anyway."
 fi
 
@@ -418,16 +441,7 @@ wait_process_alive "$API_PID" "proxmox-datacenter-api" 1 || cleanup
 echo "Checking Datacenter Manager readiness..."
 
 if command -v ss >/dev/null 2>&1; then
-  for _ in $(seq 1 60); do
-    if ss -ltn | grep -q ":${PORT:-8443} "; then
-      break
-    fi
-    sleep 1
-  done
-
-  if ! ss -ltn | grep -q ":${PORT:-8443} "; then
-    warn "PDM web interface does not appear to be listening on port ${PORT:-8443}."
-  fi
+  wait_port ":${PORT:-8443} " 60 "PDM web interface does not appear to be listening on port ${PORT:-8443}." || :
 else
   warn "Cannot run readiness port check because 'ss' is not installed."
 fi
