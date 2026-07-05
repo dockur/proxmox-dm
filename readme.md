@@ -16,12 +16,12 @@ Proxmox Datacenter Manager inside a Docker container.
 
 ## Features ✨
 
-- **Centralized management** — Manage any number of [Proxmox VE](https://github.com/dockur/proxmox/) nodes using a modern web-interface
-- **Resource monitoring** — A global dashboard visualizes the state of every node, highlighting potential issues
-- **Easy backups** — Stores all your configuration in a volume mount, for easy backup and restore
-- **Task aggregation** — Centralized access to task logs across the entire infrastructure for auditing and troubleshooting
-- **Cross-cluster migration** — Execute live migrations of virtual guests between nodes
-- **Update management** — Monitor available updates and security patches across the whole fleet
+- Runs Proxmox Datacenter Manager inside Docker
+- Provides a modern web interface for managing Proxmox VE nodes
+- Shows a global dashboard for node status and resource monitoring
+- Aggregates task logs across your infrastructure
+- Supports cross-cluster migration of virtual guests
+- Monitors available updates and security patches
 
 ## Usage  🐳
 
