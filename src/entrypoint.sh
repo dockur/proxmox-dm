@@ -24,6 +24,8 @@ require_cmd() {
     error "Required command not found: $1"
     exit 21
   }
+
+  return 0
 }
 
 ensure_dir() {
@@ -40,6 +42,8 @@ ensure_dir() {
   if [ -n "$owner" ]; then
     chown "$owner" "$dir" || :
   fi
+
+  return 0
 }
 
 process_alive() {
@@ -76,7 +80,7 @@ wait_socket() {
 
     if ! process_alive "$pid"; then
       warn "$name exited before creating socket."
-      cleanup
+      cleanup 1
     fi
 
     info "Waiting for $name socket ($i/$seconds)..."
@@ -367,9 +371,13 @@ _trap() {
   for sig; do
     trap "$func $sig" "$sig"
   done
+
+  return 0
 }
 
 cleanup() {
+  local exit_code="${1:-0}"
+
   [ -f /proxmox.end ] && return 0
   [[ "${BASHPID:-}" != "${TRAP_PID:-}" ]] && return 0
 
@@ -404,20 +412,26 @@ cleanup() {
   done
 
   echo ""
-  echo "Shutdown completed successfully."
-  exit 0
+
+  if [ "$exit_code" -eq 0 ]; then
+    echo "Shutdown completed successfully."
+  else
+    echo "Shutdown completed after an error."
+  fi
+
+  exit "$exit_code"
 }
 
 # Init trap.
 rm -f /proxmox.end
-_trap cleanup SIGTERM SIGINT
+_trap "cleanup 0" SIGTERM SIGINT
 
 # Start PDM services.
 echo "Starting proxmox-datacenter-privileged-api..."
 "$dir/proxmox-datacenter-privileged-api" &
 PRIV_API_PID="$!"
 
-wait_process_alive "$PRIV_API_PID" "proxmox-datacenter-privileged-api" 1 || cleanup
+wait_process_alive "$PRIV_API_PID" "proxmox-datacenter-privileged-api" 1 || cleanup 1
 
 sock="/run/proxmox-datacenter-manager/priv.sock"
 
@@ -435,7 +449,7 @@ runuser -u "$user" -- \
   2> >(grep -v "$msg" >&2) &
 API_PID="$!"
 
-wait_process_alive "$API_PID" "proxmox-datacenter-api" 1 || cleanup
+wait_process_alive "$API_PID" "proxmox-datacenter-api" 1 || cleanup 1
 
 # Final readiness check.
 echo "Checking Datacenter Manager readiness..."
