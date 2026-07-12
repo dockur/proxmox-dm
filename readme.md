@@ -34,6 +34,7 @@ services:
     container_name: pdm
     image: dockurr/proxmox-dm
     environment:
+      TZ: "UTC"
       PASSWORD: "root"
     ports:
       - 8443:8443
