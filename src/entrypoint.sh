@@ -4,6 +4,7 @@ set -Eeuo pipefail
 # Docker environment variables
 : "${DEBUG:="N"}"             # Enable debugging
 : "${PASSWORD:="root"}"       # Default password
+: "${PASSWORD_HASH:=""}"      # Default password hash
 : "${POSTFIX:="Y"}"           # Start Postfix for mails
 : "${RELAY_HOST:="ext.home.local"}"
 
@@ -170,7 +171,11 @@ info "For support visit https://github.com/dockur/proxmox-dm"
 echo ""
 
 # Update password for root
-printf 'root:%s\n' "$PASSWORD" | chpasswd
+if [ -n "$PASSWORD_HASH" ]; then
+  usermod -p  root <<<"$PASSWORD_HASH"
+else
+  printf 'root:%s\n' "$PASSWORD" | chpasswd
+fi
 
 # Get the capability bounding set.
 CAP_BND="$(grep '^CapBnd:' /proc/$$/status | awk '{print $2}')"
