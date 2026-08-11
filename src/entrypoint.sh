@@ -172,7 +172,7 @@ echo ""
 
 # Update password for root
 if [ -n "$PASSWORD_HASH" ]; then
-  usermod -p  root <<<"$PASSWORD_HASH"
+  printf 'root:%s\n' "$PASSWORD_HASH" | chpasswd -e
 else
   printf 'root:%s\n' "$PASSWORD" | chpasswd
 fi
