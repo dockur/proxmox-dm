@@ -233,7 +233,7 @@ fi
 # Ensure directory permissions.
 user="www-data"
 
-ensure_dir "/etc/proxmox-datacenter-manager" 1770 "$user:$user"
+ensure_dir "/etc/proxmox-datacenter-manager" 1770 "root:$user"
 ensure_dir "/etc/proxmox-datacenter-manager/auth" 0750 "root:$user"
 ensure_dir "/var/lib/proxmox-datacenter-manager" "" "$user:$user"
 ensure_dir "/var/lib/proxmox-datacenter-manager/rrdb" 0755 "$user:$user"
